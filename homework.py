@@ -37,8 +37,8 @@ VERDICTS = {
 }
 
 # Псевдонимы типа
-DictHomeworks = List[Dict[str, Union[int, str]]]
 DictHomework = Dict[str, Union[int, str]]
+DictHomeworks = List[DictHomework]
 DictResponse = Dict[str, Union[DictHomeworks, int]]
 
 
