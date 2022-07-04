@@ -4,6 +4,7 @@ import sys
 import time
 from http import HTTPStatus
 from logging import StreamHandler
+from typing import Dict, List, Union, Callable
 
 import requests
 import telegram
@@ -11,11 +12,14 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s, %(funcName)s, %(lineno)s, %(levelname)s, %(message)s',
-    handlers=[StreamHandler(stream=sys.stdout)]
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+handler = StreamHandler(stream=sys.stdout)
+formatter = logging.Formatter(
+    '%(asctime)s, %(funcName)s, %(lineno)s, %(levelname)s, %(message)s'
 )
+handler.setFormatter(formatter)
+logger.addHandler(handler)
 
 PRACTICUM_TOKEN = os.getenv('PRACTICUM_TOKEN')
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
@@ -26,25 +30,59 @@ ENDPOINT = 'https://practicum.yandex.ru/api/user_api/homework_statuses/'
 HEADERS = {'Authorization': f'OAuth {PRACTICUM_TOKEN}'}
 
 
-HOMEWORK_STATUSES = {
+VERDICTS = {
     'approved': 'Работа проверена: ревьюеру всё понравилось. Ура!',
     'reviewing': 'Работа взята на проверку ревьюером.',
     'rejected': 'Работа проверена: у ревьюера есть замечания.'
 }
 
+# Псевдонимы типа
+DictHomeworks = List[Dict[str, Union[int, str]]]
+DictHomework = Dict[str, Union[int, str]]
+DictResponse = Dict[str, Union[DictHomeworks, int]]
 
-def send_message(bot, message):
+
+class RequestAPIError(Exception):
+    """Ошибка при запросе к эндпоинту API."""
+
+    pass
+
+
+class HTTPStatusError(Exception):
+    """Ошибка доступа к API, код ответа не 200."""
+
+    pass
+
+
+class JSONParseError(Exception):
+    """Ошибка при парсинге ответа из формата json."""
+
+    pass
+
+
+class ResponseAPIError(Exception):
+    """Ошибка в ответе от сервера."""
+
+    pass
+
+
+class ResponseApiStatusUndocumented(Exception):
+    """Недокументированный статус ответа от API."""
+
+    pass
+
+
+def send_message(bot, message: Callable[[DictHomework], str]) -> str:
     """Отправка сообщения в Telegram чат с TELEGRAM_CHAT_ID."""
     try:
         bot.send_message(TELEGRAM_CHAT_ID, message)
-        logging.info('Сообщение в Telegram чат {TELEGRAM_CHAT_ID}: {message}')
-    except Exception:
-        logging.error(
-            'Ошибка отправки сообщения в Telegram чат {TELEGRAM_CHAT_ID}'
-        )
+        logger.info('Сообщение в Telegram чат {TELEGRAM_CHAT_ID}: {message}')
+    except Exception as error:
+        raise telegram.error.TelegramError(f'Ошибка при отправке сообщения в'
+                                           f'Telegram чат, {error}')
 
 
-def get_api_answer(current_timestamp):
+def get_api_answer(current_timestamp: float) -> DictResponse:
     """Запрос к эндпоинту API-сервиса.
 
     В случае успешного запроса должна вернуть ответ API,
@@ -58,21 +96,20 @@ def get_api_answer(current_timestamp):
             headers=HEADERS,
             params=params
         )
-    except Exception as error:
-        logging.error(f'Ошибка при запросе к эндпоинту API: {error}')
-        raise Exception(f'Ошибка при запросе к эндпоинту API: {error}')
+    except requests.exceptions.RequestException as error:
+        raise RequestAPIError(f'Ошибка при запросе к эндпоинту API: {error}')
     if homework_statuses.status_code != HTTPStatus.OK:
         status_code = homework_statuses.status_code
-        logging.error(f'Ошибка доступа к API, код ответа: {status_code}')
-        raise Exception(f'Ошибка доступа к API, код ответа: {status_code}')
+        raise HTTPStatusError(f'Ошибка доступа к API, код ответа:'
+                              f'{status_code}')
     try:
         return homework_statuses.json()
-    except ValueError:
-        logging.error('Ошибка при парсинге ответа из формата json')
-        raise ValueError('Ошибка при парсинге ответа из формата json')
+    except JSONParseError as error:
+        raise JSONParseError(f'Ошибка при парсинге ответа из формата json:'
+                             f'{error}')
 
 
-def check_response(response):
+def check_response(response: Callable[[float], DictResponse]) -> DictHomeworks:
     """
     Проверка ответа API на корректность.
 
@@ -80,23 +117,23 @@ def check_response(response):
     то функция должна вернуть список домашних работ,
     доступный в ответе API по ключу 'homeworks'.
     """
-    if type(response) is not dict:
+    if not isinstance(response, dict):
         raise TypeError('Ответ API не словарь')
     try:
         list_works = response['homeworks']
-    except KeyError:
-        logging.error('Ошибка доступа по ключу homeworks в словаре')
-        raise KeyError('Ошибка доступа по ключу homeworks в словаре')
+    except ResponseAPIError:
+        raise ResponseAPIError('Ошибка доступа.'
+                               'В ответе отсутствует ключ homeworks')
     if type(list_works) is not list:
         raise TypeError('Вывод по ключу homeworks не является списком')
     return list_works
 
 
-def parse_status(homework):
+def parse_status(homework: DictHomework) -> str:
     """Извлекает из информации о конкретной домашней работе ее статус.
 
     В случае успеха, функция возвращает подготовленную для отправки
-    в Telegram строку, содержащую один из вердиктов словаря HOMEWORK_STATUSES.
+    в Telegram строку, содержащую один из вердиктов словаря VERDICTS.
     """
     if 'homework_name' not in homework:
         raise KeyError('В ответе API отсутствует ключ homework_name')
@@ -104,25 +141,25 @@ def parse_status(homework):
         raise KeyError('В ответе API отсутствует ключ status')
     homework_name = homework['homework_name']
     homework_status = homework['status']
-    if homework_status not in HOMEWORK_STATUSES:
-        raise Exception(f'В ответа API обнаружен недокументированный статус '
-                        f'домашней работы: {homework_status}')
-    verdict = HOMEWORK_STATUSES[homework_status]
+    if homework_status not in VERDICTS:
+        raise ResponseApiStatusUndocumented(f'В ответа API обнаружен'
+                                            f'недокументированный статус'
+                                            f'работы: {homework_status}')
+    verdict = VERDICTS[homework_status]
     return f'Изменился статус проверки работы "{homework_name}". {verdict}'
 
 
-def check_tokens():
+def check_tokens() -> bool:
     """Проверка доступности необходимых переменных окружения."""
     env_variables = [PRACTICUM_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID]
-    for variable in env_variables:
-        if variable is None:
-            logging.critical('Отсутствуют обязательные переменные окружения!')
-            return False
-    logging.info('Все обязательные переменные окружения обнаружены')
-    return True
+    if all(env_variables):
+        logger.info('Все обязательные переменные окружения обнаружены')
+        return True
+    logger.critical('Отсутствуют обязательные переменные окружения!')
+    return False
 
 
-def main():
+def main() -> None:
     """Основная логика работы бота."""
     if not check_tokens():
         raise Exception('Отсутствуют обязательные переменные окружения!')
@@ -136,12 +173,12 @@ def main():
             if homeworks:
                 send_message(bot, parse_status(homeworks[0]))
             else:
-                logging.info('В ответе отсутствуют новые статусы работ')
+                logger.info('В ответе отсутствуют новые статусы работ')
             current_timestamp = response.get('current_date')
             time.sleep(RETRY_TIME)
         except Exception as error:
             now_error = f'Сбой в работе программы: {error}'
-            logging.error(now_error)
+            logger.error(now_error)
             if previous_error != now_error:
                 previous_error = now_error
                 send_message(bot, now_error)
