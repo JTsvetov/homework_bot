@@ -4,8 +4,9 @@ import sys
 import time
 from http import HTTPStatus
 from logging import StreamHandler
-from typing import Dict, List, Union, Callable
+from typing import Callable, Dict, List, Union
 
+import exceptions
 import requests
 import telegram
 from dotenv import load_dotenv
@@ -42,43 +43,13 @@ DictHomeworks = List[DictHomework]
 DictResponse = Dict[str, Union[DictHomeworks, int]]
 
 
-class RequestAPIError(Exception):
-    """Ошибка при запросе к эндпоинту API."""
-
-    pass
-
-
-class HTTPStatusError(Exception):
-    """Ошибка доступа к API, код ответа не 200."""
-
-    pass
-
-
-class JSONParseError(Exception):
-    """Ошибка при парсинге ответа из формата json."""
-
-    pass
-
-
-class ResponseAPIError(Exception):
-    """Ошибка в ответе от сервера."""
-
-    pass
-
-
-class ResponseApiStatusUndocumented(Exception):
-    """Недокументированный статус ответа от API."""
-
-    pass
-
-
 def send_message(bot, message: Callable[[DictHomework], str]) -> str:
     """Отправка сообщения в Telegram чат с TELEGRAM_CHAT_ID."""
     try:
         bot.send_message(TELEGRAM_CHAT_ID, message)
         logger.info('Сообщение в Telegram чат {TELEGRAM_CHAT_ID}: {message}')
     except Exception as error:
-        raise telegram.error.TelegramError(f'Ошибка при отправке сообщения в'
+        raise telegram.error.TelegramError(f'Ошибка при отправке сообщения в '
                                            f'Telegram чат, {error}')
 
 
@@ -97,16 +68,20 @@ def get_api_answer(current_timestamp: float) -> DictResponse:
             params=params
         )
     except requests.exceptions.RequestException as error:
-        raise RequestAPIError(f'Ошибка при запросе к эндпоинту API: {error}')
+        raise exceptions.RequestAPIError(
+            f'Ошибка при запросе к эндпоинту API: {error}. '
+            f'Адрес эндпоинта: {ENDPOINT}; Заголовки: {HEADERS}; '
+            f'Параметры: {params}'
+        )
     if homework_statuses.status_code != HTTPStatus.OK:
         status_code = homework_statuses.status_code
-        raise HTTPStatusError(f'Ошибка доступа к API, код ответа:'
-                              f'{status_code}')
+        raise exceptions.HTTPStatusError(f'Ошибка доступа к API, код ответа: '
+                                         f'{status_code}')
     try:
         return homework_statuses.json()
-    except JSONParseError as error:
-        raise JSONParseError(f'Ошибка при парсинге ответа из формата json:'
-                             f'{error}')
+    except exceptions.JSONParseError as error:
+        raise exceptions.JSONParseError(f'Ошибка при парсинге ответа '
+                                        f'из формата json: {error}')
 
 
 def check_response(response: Callable[[float], DictResponse]) -> DictHomeworks:
@@ -121,9 +96,10 @@ def check_response(response: Callable[[float], DictResponse]) -> DictHomeworks:
         raise TypeError('Ответ API не словарь')
     try:
         list_works = response['homeworks']
-    except ResponseAPIError:
-        raise ResponseAPIError('Ошибка доступа.'
-                               'В ответе отсутствует ключ homeworks')
+    except exceptions.ResponseAPIError:
+        raise exceptions.ResponseAPIError(
+            'Ошибка доступа. В ответе отсутствует ключ homeworks'
+        )
     if type(list_works) is not list:
         raise TypeError('Вывод по ключу homeworks не является списком')
     return list_works
@@ -142,9 +118,10 @@ def parse_status(homework: DictHomework) -> str:
     homework_name = homework['homework_name']
     homework_status = homework['status']
     if homework_status not in VERDICTS:
-        raise ResponseApiStatusUndocumented(f'В ответа API обнаружен'
-                                            f'недокументированный статус'
-                                            f'работы: {homework_status}')
+        raise exceptions.ResponseApiStatusUndocumented(
+            f'В ответа API обнаружен недокументированный статус работы:'
+            f'{homework_status}'
+        )
     verdict = VERDICTS[homework_status]
     return f'Изменился статус проверки работы "{homework_name}". {verdict}'
 
